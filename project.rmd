@@ -9,10 +9,14 @@ In your project, you must address the questions below, but you are also expected
 
 ```{r}
 #loading in the necessary packages
+library(correlation)
 library(tidyverse)
 library(corrr)
 library(ggplot2)
 library(reshape2)
+library(RColorBrewer)
+library(ggnewscale)
+library(colorspace)
 ```
 
 I start out using the SNP dataset so I can ceck which snps each individual has.
@@ -25,13 +29,23 @@ snps <- read.table("SNPs.txt",header=TRUE, sep="\t", na.strings="NA", dec=".", s
 snp_archaic <- snps %>%
   filter(archaic != "human") %>%
   distinct(name, chrom, start, .keep_all = TRUE) %>%  # Keep only one row per SNP per individual
-  arrange("name")
+  arrange(region)
 
 # A vector of all the snp's in the dataset since it could come in handy later
 unique_snps <- unique(snp_archaic$start)
 
 # Create a list of unique individuals. This will be used later for plotting the data
 individuals <- unique(snp_archaic$name)
+
+snp_denisova <- snps %>%
+  filter(archaic == "Denisova_nofil") %>%
+  distinct(name, chrom, start, .keep_all = TRUE) %>%  # Keep only one row per SNP per individual
+  arrange(region)
+
+snp_neanderthal <- snps %>%
+  filter(archaic == "AltaiNea_nofil" | archaic =="Vi33.19_nofil") %>%
+  distinct(name, chrom, start, .keep_all = TRUE) %>%  # Keep only one row per SNP per individual
+  arrange(region)
 ```
 
 Here I prepare for checking the correlation in the snps that each individual contains. 
@@ -45,13 +59,98 @@ snp_matrix <- snp_archaic %>%
   distinct(name, start) %>%  # Remove duplicates if any
   mutate(present = 1) %>%
   pivot_wider(names_from = name, values_from = present, values_fill = 0)
+
+snp_matrix_denisova <- snp_denisova %>%
+  select(name, start) %>%
+# Step 2: Create presence/absence table
+  distinct(name, start) %>%  # Remove duplicates if any
+  mutate(present = 1) %>%
+  pivot_wider(names_from = name, values_from = present, values_fill = 0)
+
+
 ```
 
 
 ```{r}
 # Makes a correlation matrix of a subset or of the whole dataset of snps and individuals.
-cor_matrix <- snp_matrix[,1:100] %>%
+cor_matrix <- snp_matrix %>%
+  select(-start)%>%
   correlate()
+
+cor_matrix_denisova <- snp_matrix_denisova %>%
+  select(-start)%>%
+  correlate()
+
+```
+
+
+```{r}
+# loading in the segments dataset which contains information about geographic placement of individuals
+segments <- read.table("ArchaicSegments.txt",header=TRUE, sep="\t", na.strings="NA", dec=".", strip.white=TRUE)
+
+```
+
+Here I get an overview of the ArchaicSegments data. Checking how many individuals there are from each population, country and region. It is rather useful since we don't want to look at correlation in populations with only one individual for example.
+```{r}
+# Count unique individuals per population
+count_pop <- segments %>%
+  distinct(name, pop) %>%
+  count(pop, name = "individuals_per_pop")
+
+# Count unique individuals per country
+count_country <- segments %>%
+  distinct(name, country) %>%
+  count(country, name = "individuals_per_country")
+
+# Count unique individuals per region
+count_region <- segments %>%
+  distinct(name, region) %>%
+  count(region, name = "individuals_per_region")
+
+```
+
+
+**A. To what extent do individuals share SNPs contributed by archaic human introgression? In other words, how correlated are the archaic contents in two individuals?**
+
+```{r}
+
+# Function to merge ranges and calculate total length
+merge_segments <- function(df) {
+  
+  ir <- IRanges(start = df$start, end = df$end)
+  merged <- reduce(ir)  # Merge overlapping/adjacent segments
+  total_length <- sum(width(merged))  # Sum the lengths
+  
+ 
+  
+  return(total_length)
+  
+}
+```
+
+```{r}
+library(IRanges)
+# Summaries of each group
+segments_ind <- segments %>%
+  filter(length > 0) %>%
+  group_by(name) %>%
+  summarise(total_length = merge_segments(cur_data()),
+            pop = unique(pop),
+            country = unique(country),
+            region = unique(region),
+            name = unique(name),
+            .groups = "drop")
+  
+ detach("package:IRanges", unload = TRUE, character.only = TRUE)
+detach("package:S4Vectors", unload = TRUE, character.only = TRUE)
+detach("package:BiocGenerics", unload = TRUE, character.only = TRUE)
+```
+
+This is for dividing the correlation data later
+```{r}
+# Makes a dataset which only contains each individual once and their population, country and region
+segments_clean <- segments %>%
+  distinct(name, pop, country, region)
 ```
 
 ```{r}
@@ -75,129 +174,17 @@ cor_tibble <- cor_tibble %>%
     ind1 = factor(ind1, levels = individuals),
     ind2 = factor(ind2, levels = individuals)
   )
-```
 
-```{r}
-library(RColorBrewer)
+# Make the matrix into a tibble with each row as a correlation between two individuals
+cor_tibble_denisova <- melt(cor_matrix_denisova, value.name = "correlation") %>%
+  rename(ind1 = term, ind2 = variable) # Rename columns if needed
 
-seg_sort <- segments_ind %>%
-  arrange(region, country)
-
-individuals_df <- data.frame(
-  individual = seg_sort$name,  # ordered as in your correlation matrix
-  region = seg_sort$region     # region each individual belongs to
-) %>%
-  mutate(index = row_number())
-
-region_palette <- setNames(
-  brewer.pal(length(unique(segments_ind$region)), "Set2"),
-  unique(segments_ind$region)
-)
-
-library(ggnewscale)
-
-cor_annotated <- cor_annotated %>%
-  arrange(region_1, country_1, pop_1)
-
-ggplot(cor_annotated, aes(x = ind1, y = ind2, fill = correlation)) +
-  geom_tile() +
-
-  # First heatmap fill scale (correlations)
-  scale_fill_gradient2(high = "white", low = "darkblue", mid = "#EE2C2C", midpoint = 0.5,
-                       name = "Correlation") +
-  new_scale_fill() +  # allow second fill scale for regions
-
-  # Top region annotation
-  geom_tile(
-    data = individuals_df,
-    aes(x = index, y = 0, fill = region),
-    inherit.aes = FALSE,
-    height = 10
-  ) +
-
-  # Left region annotation
-  geom_tile(
-    data = individuals_df,
-    aes(x = 0, y = index, fill = region),
-    inherit.aes = FALSE,
-    width = 10
-  ) +
-
-  # Region fill scale (for annotation bars)
-  scale_fill_manual(values = region_palette, name = "Region") +
-
-  # Styling
-  theme_minimal() +
-  theme(
-    axis.text.x = element_blank(),
-    axis.text.y = element_blank(),
-    axis.title = element_blank(),
-    panel.grid = element_blank(),
-    plot.margin = margin(20, 60, 20, 60),  # add margin for visibility
-    legend.position = "right"
-  ) +
-  coord_fixed(clip = "off")
-```
-
-
-```{r}
-# loading in the segments dataset which contains information about geographic placement of individuals
-segments <- read.table("ArchaicSegments.txt",header=TRUE, sep="\t", na.strings="NA", dec=".", strip.white=TRUE)
-
-```
-
-Here I get an overview of the ArchaicSegments data. Checking how many individuals there are from each population, country and region. It is rather useful since we don't want to look at correlation in populations with only one individual for example.
-```{r}
-# Count unique individuals per population
-pop_count <- segments %>%
-  distinct(name, pop) %>%
-  count(pop, name = "individuals_per_pop")
-
-# Count unique individuals per country
-country_count <- segments %>%
-  distinct(name, country) %>%
-  count(country, name = "individuals_per_country")
-
-# Count unique individuals per region
-region_count <- segments %>%
-  distinct(name, region) %>%
-  count(region, name = "individuals_per_region")
-
-```
-
-
-**A. To what extent do individuals share SNPs contributed by archaic human introgression? In other words, how correlated are the archaic contents in two individuals?**
-
-```{r}
-library(IRanges)
-# Function to merge ranges and calculate total length
-merge_segments <- function(df) {
-  ir <- IRanges(start = df$start, end = df$end)
-  merged <- reduce(ir)  # Merge overlapping/adjacent segments
-  total_length <- sum(width(merged))  # Sum the lengths
-  return(total_length)
-}
-
-```
-
-```{r}
-# Summaries of each group
-segments_ind <- segments %>%
-  filter(length > 0) %>%
-  group_by(name) %>%
-  summarise(total_length = merge_segments(cur_data()),
-            pop = unique(pop),
-            country = unique(country),
-            region = unique(region),
-            name = unique(name),
-            .groups = "drop")
-```
-
-This is for dividing the correlation data later
-```{r}
-# Makes a dataset which only contains each individual once and their population, country and region
-segments_clean <- segments %>%
-  distinct(name, pop, country, region)
+# Apply the factor levels with uppercase names
+cor_tibble_denisova <- cor_tibble_denisova %>%
+  mutate(
+    ind1 = factor(ind1, levels = individuals),
+    ind2 = factor(ind2, levels = individuals)
+  )
 ```
 
 ```{r}
@@ -205,21 +192,94 @@ segments_clean <- segments %>%
 cor_annotated <- cor_tibble %>%
   left_join(segments_clean, by = c("ind1" = "name")) %>%
   left_join(segments_clean, by = c("ind2" = "name"), suffix = c("_1", "_2"))
+
+cor_annotated_denisova <- cor_tibble_denisova %>%
+  left_join(segments_clean, by = c("ind1" = "name")) %>%
+  left_join(segments_clean, by = c("ind2" = "name"), suffix = c("_1", "_2"))
 ```
+
+
+```{r}
+# Create a named vector mapping individual names to their index
+name_to_index <- setNames(individuals_df$index, individuals_df$individual)
+
+# Add index to cor_annotated (you might already have this, but ensure it's sorted)
+cor_annotated <- cor_annotated %>%
+  mutate(
+    ind1_index = name_to_index[ind1],
+    ind2_index = name_to_index[ind2]
+    )
+
+name_to_index <- setNames(individuals_df$index, individuals_df$individual)
+
+# Add index to cor_annotated (you might already have this, but ensure it's sorted)
+cor_annotated_denisova <- cor_annotated_denisova %>%
+  mutate(
+    ind1_index = name_to_index[ind1],
+    ind2_index = name_to_index[ind2]
+    )
+```
+
+
+```{r}
+ggplot(cor_annotated, aes(x = ind1_index, y = ind2_index, fill = correlation)) +
+  geom_tile() +
+
+  # First fill scale: correlations
+  scale_fill_gradient2(high = "white", low = "darkblue", mid = "#EE2C2C", midpoint = 0.5,
+                       name = "Correlation") +
+  new_scale_fill() +
+
+  # Top annotation
+  geom_tile(
+    data = individuals_df,
+    aes(x = index, y = 0, fill = region),
+    inherit.aes = FALSE,
+    height = 10
+  ) +
+
+  # Left annotation
+  geom_tile(
+    data = individuals_df,
+    aes(x = 0, y = index, fill = region),
+    inherit.aes = FALSE,
+    width = 10
+  ) +
+
+  # Region color scale
+  scale_fill_manual(values = region_palette, name = "Region") +
+
+  # Theme
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = margin(20, 60, 20, 60),
+    legend.position = "right"
+  ) +
+  coord_fixed(clip = "off")
+
+```
+
 
 This makes a dataset of the mean correlations between individuals in each population. Note that some populations in the dataset only contains one individual and is therefore not taken into account.
 ```{r}
 # Correlations between individuals from the same populations
-within_pop <- cor_annotated %>%
+same_pop <- cor_annotated %>%
   filter(pop_1 == pop_2) %>%
   group_by(pop_1) %>%
   summarise(
     mean_correlation = mean(correlation, na.rm = TRUE),
-    num_individuals = n_distinct(ind1)  # Count unique individuals
+    num_individuals = n_distinct(ind1), # Count unique individuals
+    country = unique(country_1) 
   ) %>%
   filter(num_individuals > 1)  # Skip populations with only 1 individual
 
-mean(within_pop$mean_correlation)
+mean_pop <- mean(same_pop$mean_correlation)
+
+mean_all <- mean(na.omit(cor_annotated_denisova$correlation))
 ```
 
 
@@ -228,8 +288,8 @@ mean(within_pop$mean_correlation)
 Since we only want to know how the correlation changes when we compare individuals from different populations I decided to make it so we only individuals that are from the same country, but from different populations.
 ```{r}
 # Correlation between individuals from different populations, but still the same country
-within_country <- cor_annotated %>%
-  filter(pop_1 != pop_2, country_1 == country_2)%>%
+same_country <- cor_annotated %>%
+  filter(country_1 == country_2)%>%
   group_by(country_1) %>%
   summarise(
     mean_correlation = mean(correlation, na.rm = TRUE),
@@ -237,108 +297,141 @@ within_country <- cor_annotated %>%
   ) %>%
   filter(num_individuals > 1)  # Skip countries with only 1 individual
 
-mean(within_country$mean_correlation)
-
-cor_annotated %>%
-  filter(pop_1 != pop_2)%>%
-  filter(country_1 == country_2)
+mean_country <- mean(same_country$mean_correlation)
 ```
 
 
 **C. How does it change when comparing individuals from different geographical regions?**
 
-
 ```{r}
-within_region <- cor_annotated %>%
+same_region <- cor_annotated %>%
+  filter(region_1 == region_2) %>%
+  group_by(region_1) %>%
+  summarise(
+    mean_correlation = mean(correlation, na.rm = TRUE),
+    num_individuals = n_distinct(ind1)) # Count unique individuals
+    
+mean_region <- mean(same_region$mean_correlation)
+    
+diff_region <- cor_annotated %>%
   filter(region_1 != region_2) %>%
   group_by(region_1) %>%
   summarise(
     mean_correlation = mean(correlation, na.rm = TRUE),
-    num_individuals = n_distinct(ind1)  # Count unique individuals
+    num_individuals = n_distinct(ind1), # Count unique individuals
+    
   ) %>%
   filter(num_individuals > 1)  # Skip regions with only 1 individual
 
-within_region
-mean(within_region$mean_correlation)
+mean_diff_region <- mean(diff_region$mean_correlation)
 
 cor_annotated %>%
   filter(region_1 != region_2)
 ```
 
-
 ```{r}
-library(colorspace)
+bar_x <- c("All", "Same population", "Same country", "Different region")
+bar_y <- c(mean_all, mean_pop, mean_country, mean_diff_region)
 
-create_heatmap <- function(region, data){
+bar_data <- data.frame(x = bar_x, y = bar_y)
 
-cor_region <- data %>%
-  filter(region_1 == region) %>%
-  filter(region_1 == region_2) %>%
-  arrange(country_1, pop_1) %>%
-  group_by(region_2)
-
-individuals_df <- data.frame(
-  individual = cor_region$ind1,
-  country = cor_region$country_1
-) %>%
-  unique() %>%
-  mutate(index = row_number())
-
-n <- length(unique(cor_region$country_1))
-
-# Generate 48 distinct colors using HCL space
-country_palette <- qualitative_hcl(n, palette = "Dark 3")
-names(country_palette) <- sort(unique(individuals_df$country))  # or region
-
-ggplot(cor_region, aes(x = ind1, y = ind2, fill = correlation)) +
-  geom_tile() +
-
-  # First heatmap fill scale (correlations)
-  scale_fill_gradient2(high = "white", low = "darkblue", mid = "#EE2C2C", midpoint = 0.5,
-                       name = "Correlation") +
-  new_scale_fill() +  # allow second fill scale for regions
-
-  # Top region annotation
-  geom_tile(
-    data = individuals_df,
-    aes(x = index, y = 0, fill = country),
-    inherit.aes = FALSE,
-    height = 0.5+ 0.5*log(n)
+ggplot(bar_data, aes(x = x, y = y)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    x = "Geographic partition",
+    y = "Mean correlation in archaic SNPs",
+    title = "Mean correlation in different subsets"
   ) +
-
-  # Left region annotation
-  geom_tile(
-    data = individuals_df,
-    aes(x = 0, y = index, fill = country),
-    inherit.aes = FALSE,
-    width = 0.5 + 0.5*log(n)
-  ) +
-
-  # Region fill scale (for annotation bars)
-  scale_fill_manual(values = country_palette, name = "Country") +
-
-  # Styling
-  labs(title = region) +
   theme_minimal() +
   theme(
-    axis.text.x = element_blank(),
-    axis.text.y = element_blank(),
-    axis.title = element_blank(),
-    panel.grid = element_blank(),
-    plot.margin = margin(20, 60, 20, 60),  # add margin for visibility
-    legend.text = element_text(size = 6),
-  legend.title = element_text(size = 7),
-  legend.key.size = unit(0.4, "cm"),  # make legend boxes smaller
-    legend.position = "right",
-  plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
-  ) +
-  coord_fixed(clip = "off")}
+    plot.title = element_text(hjust = 0.5)
+  )
+
 ```
 
 
+```{r}
+create_heatmap <- function(region, data) {
+  # Filter to the region of interest
+  cor_region <- data %>%
+    filter(region_1 == region, region_1 == region_2) %>%
+    arrange(country_1, pop_1)  # Ensures individuals are ordered by country
+
+  # Extract unique individuals and assign an index based on country-sorted order
+  individuals_df <- data.frame(
+    individual = cor_region$ind1,
+    country = cor_region$country_1
+  ) %>%
+    unique() %>%
+    arrange(country, individual) %>%
+    mutate(index = row_number())
+
+  # Create lookup vector: name -> index
+  name_to_index <- setNames(individuals_df$index, individuals_df$individual)
+
+  # Apply index to correlation data
+  cor_region <- cor_region %>%
+    mutate(
+      ind1_index = name_to_index[ind1],
+      ind2_index = name_to_index[ind2]
+    )
+
+  # Generate color palette for countries
+  n <- length(unique(individuals_df$country))
+  country_palette <- qualitative_hcl(n, palette = "Dark 3")
+  names(country_palette) <- sort(unique(individuals_df$country))
+
+  # Create the plot
+  ggplot(cor_region, aes(x = ind1_index, y = ind2_index, fill = correlation)) +
+    geom_tile() +
+    scale_fill_gradient2(
+      high = "white", low = "darkblue", mid = "#EE2C2C", midpoint = 0.5,
+      name = "Correlation"
+    ) +
+    new_scale_fill() +
+
+    # Top annotation
+    geom_tile(
+      data = individuals_df,
+      aes(x = index, y = 0, fill = country),
+      inherit.aes = FALSE,
+      height = 0.5 + 0.5 * log(n)
+    ) +
+
+    # Left annotation
+    geom_tile(
+      data = individuals_df,
+      aes(x = 0, y = index, fill = country),
+      inherit.aes = FALSE,
+      width = 0.5 + 0.5 * log(n)
+    ) +
+
+    scale_fill_manual(values = country_palette, name = "Country") +
+
+    labs(title = region) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      plot.margin = margin(20, 60, 20, 60),
+      legend.text = element_text(size = 6),
+      legend.title = element_text(size = 7),
+      legend.key.size = unit(0.4, "cm"),
+      legend.position = "right",
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+    ) +
+    coord_fixed(clip = "off")
+}
+
+```
 
 
 ```{r}
+
+regions <- unique(cor_annotated$region_1)
+
 for (region in regions){
   heat <- create_heatmap(region, cor_annotated)
   print(heat)
@@ -390,31 +483,31 @@ for (reg in regions){
 ```
 ```{r}
 # Correlations between individuals from the same populations
-epas_within_pop <- epas_cor_annotated %>%
+epas_same_pop <- epas_cor_annotated %>%
   filter(pop_1 == pop_2) %>%
   group_by(pop_1) %>%
   summarise(
     mean_correlation = mean(correlation, na.rm = TRUE),
     num_individuals = n_distinct(ind1)  # Count unique individuals
   ) %>%
+  na.omit() %>%
   filter(num_individuals > 1)  # Skip populations with only 1 individual
-mean(within_pop$mean_correlation)
-epas_within_pop
+
 ```
+
 ```{r}
 # Correlation between individuals from different populations, but still the same country
-epas_within_country <- epas_cor_annotated %>%
+epas_same_country <- epas_cor_annotated %>%
   filter(country_1 == country_2)%>%
   group_by(country_1) %>%
   summarise(
     mean_correlation = mean(correlation, na.rm = TRUE),
     num_individuals = n_distinct(ind1)  # Count unique individuals
   ) %>%
+  na.omit() %>%
   filter(num_individuals > 1)  # Skip countries with only 1 individual
 
-mean(within_country$mean_correlation)
 
-epas_within_country
 ```
 
 ```{r}
@@ -425,22 +518,78 @@ epas_dif_region <- epas_cor_annotated %>%
     mean_correlation = mean(correlation, na.rm = TRUE),
     num_individuals = n_distinct(ind1)  # Count unique individuals
   ) %>%
+  na.omit() %>%
   filter(num_individuals > 1)  # Skip regions with only 1 individual
 
-mean(epas_dif_region$mean_correlation)
-mean(within_region$mean_correlation)
+
 ```
+
+```{r}
+epas_mean_pop <- mean(epas_same_pop$mean_correlation)
+epas_mean_all <- mean(na.omit(epas_cor_annotated$correlation))
+epas_mean_country <- mean(epas_same_country$mean_correlation)
+epas_mean_dif_region <- mean(epas_dif_region$mean_correlation)
+
+
+
+epas_bar_x <- c("All", "Same population", "Same country", "Different region")
+epas_bar_y <- c(epas_mean_all, epas_mean_pop, epas_mean_country, epas_mean_dif_region)
+
+epas_bar_data <- data.frame(x = epas_bar_x, y = epas_bar_y)
+
+ggplot(epas_bar_data, aes(x = x, y = y)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    x = "Geographic partition",
+    y = "Mean correlation in archaic SNPs",
+    title = "Mean correlation in different subsets"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+combined_bar_data <- data.frame(
+  Category = rep(bar_x, 2),
+  Correlation = c(epas_bar_y, bar_y),
+  Gene = rep(c("EPAS1", "All"), each = length(bar_x))
+)
+
+ggplot(combined_bar_data, aes(x = Category, y = Correlation, fill = Gene)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    x = "Geographic partition",
+    y = "Mean correlation in archaic SNPs",
+    title = "Comparison of mean correlation across subsets"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  scale_fill_manual(values = c("EPAS1" = "steelblue", "All" = "darkorange"))
+
+```
+
 
 **E. What is the total amount of admixture (archaic genomic sequence) in each non-African individual genome?**
 
+Ranges from 1.5% to 4.4% with a mean of 2.7%
 ```{r}
 segments_ind$percentage <- segments_ind$total_length/(3.1*10^9)
+mean(segments_ind$percentage)
+max(segments_ind$percentage)
+min(segments_ind$percentage)
+
 ```
 
 
 **F. What is the total amount of admixture (archaic genomic sequence) in the region around EPAS1 in each individual?**
 
+Ranges from 0.8% to 91% with a mean of 40%
 ```{r}
+library(IRanges)
 epas_segments <- segments %>%
   filter(length > 0,start >= epas_window[1], end <= epas_window[2]) %>%
   group_by(name) %>%
@@ -452,12 +601,54 @@ epas_segments <- segments %>%
             .groups = "drop")
 
 epas_segments$percentage <- epas_segments$total_length / (epas_window[2] - epas_window[1])
+
+detach("package:IRanges", unload = TRUE, character.only = TRUE)
+detach("package:S4Vectors", unload = TRUE, character.only = TRUE)
+detach("package:BiocGenerics", unload = TRUE, character.only = TRUE)
+
+mean(epas_segments$percentage)
+max(epas_segments$percentage)
+min(epas_segments$percentage)
 ```
 
 
 **G. Do individuals with large admixture totals have more correlated admixture patterns? Do individuals with large admixture totals in the EPAS1 region have more correlated admixture patterns in the EPAS1 region? Can you find any evidence of adaptive introgression?**
 
+```{r}
+top_10_percent <- segments_ind %>%
+  filter(total_length >= quantile(total_length, 0.90, na.rm = TRUE))
 
+low_10_percent <- segments_ind %>%
+  filter(total_length <= quantile(total_length, 0.10, na.rm = TRUE))
+
+top_10_corr <- cor_annotated %>%
+  filter(ind1 %in% top_10_percent$name & ind2 %in% top_10_percent$name)
+
+low_10_corr <- cor_annotated %>%
+  filter(ind1 %in% low_10_percent$name & ind2 %in% low_10_percent$name)
+
+mean(na.omit(top_10_corr$correlation))
+mean(na.omit(low_10_corr$correlation))
+
+
+```
+
+```{r}
+top_10_epas <- epas_segments %>%
+  filter(total_length >= quantile(total_length, 0.90, na.rm = TRUE))
+
+low_10_epas <- epas_segments %>%
+  filter(total_length <= quantile(total_length, 0.10, na.rm = TRUE))
+
+top_10_epas_corr <- epas_cor_annotated %>%
+  filter(ind1 %in% top_10_epas$name & ind2 %in% top_10_epas$name)
+
+low_10_epas_corr <- epas_cor_annotated %>%
+  filter(ind1 %in% low_10_epas$name & ind2 %in% low_10_epas$name)
+
+mean(na.omit(top_10_epas_corr$correlation))
+mean(na.omit(low_10_epas_corr$correlation))
+```
 
 
 **H. Perform any additional analyses of your own choice.**
